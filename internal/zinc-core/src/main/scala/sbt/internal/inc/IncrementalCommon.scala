@@ -308,8 +308,9 @@ private[inc] abstract class IncrementalCommon(
     // log.debug(s"[zinc] detectAPIChanges(recompiledClasses = $recompiledClasses)")
     def classDiff(className: String, a: AnalyzedClass, b: AnalyzedClass): Option[APIChange] = {
       // log.debug(s"[zinc] classDiff($className, ${a.name}, ${b.name})")
-      if (a.compilationTimestamp() == b.compilationTimestamp() && (a.apiHash == b.apiHash)) None
-      else {
+      /* if (a.compilationTimestamp() == b.compilationTimestamp() && (a.apiHash == b.apiHash)) None
+      else */
+      {
         val hasMacro = a.hasMacro || b.hasMacro
         if (hasMacro && IncOptions.getRecompileOnMacroDef(options)) {
           Some(APIChangeDueToMacroDefinition(className))
