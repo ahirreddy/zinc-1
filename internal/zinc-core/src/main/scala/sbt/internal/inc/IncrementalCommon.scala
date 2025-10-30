@@ -315,8 +315,12 @@ private[inc] abstract class IncrementalCommon(
         if (hasMacro && IncOptions.getRecompileOnMacroDef(options)) {
           Some(APIChangeDueToMacroDefinition(className))
         } else if (
-          APIUtil.isAnnotationDefinition(a.api().classApi()) ||
-          APIUtil.isAnnotationDefinition(b.api().classApi())
+          // Annotation usages need to be recompiled when the retention policy changes. This is
+          // reflected in the API hash.
+          (APIUtil.isAnnotationDefinition(a.api().classApi()) || APIUtil.isAnnotationDefinition(
+            b.api().classApi()
+          )) &&
+          a.apiHash() != b.apiHash()
         ) {
           Some(APIChangeDueToAnnotationDefinition(className))
         } else {
