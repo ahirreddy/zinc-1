@@ -298,14 +298,26 @@ private[inc] abstract class IncrementalCommon(
    * @param recompiledClasses The list of classes that were recompiled in this round.
    * @param oldAPI A function that returns the previous class associated with a given class name.
    * @param newAPI A function that returns the current class associated with a given class name.
+   * @param anyBinaryChanged Whether any binary dependency (library jar) has changed. When false
+   *                         and no other API changes are detected, macro definitions are not
+   *                         treated as changed because their expansion behavior cannot differ
+   *                         if all dependencies are identical.
    * @return A list of API changes of the given two analyzed classes.
    */
   def detectAPIChanges(
       recompiledClasses: collection.Set[String],
       oldAPI: String => AnalyzedClass,
-      newAPI: String => AnalyzedClass
+      newAPI: String => AnalyzedClass,
+      anyBinaryChanged: Boolean = true
   ): APIChanges = {
     // log.debug(s"[zinc] detectAPIChanges(recompiledClasses = $recompiledClasses)")
+
+    // When anyBinaryChanged is false, macro classes are collected here instead of being
+    // flagged immediately. They are promoted to APIChangeDueToMacroDefinition only if
+    // any other (non-macro) API change is detected, which indicates that some upstream
+    // dependency did change and macros may need re-expansion.
+    val pendingMacroClasses = scala.collection.mutable.ArrayBuffer.empty[String]
+
     def classDiff(className: String, a: AnalyzedClass, b: AnalyzedClass): Option[APIChange] = {
       // log.debug(s"[zinc] classDiff($className, ${a.name}, ${b.name})")
       /* if (a.compilationTimestamp() == b.compilationTimestamp() && (a.apiHash == b.apiHash)) None
@@ -313,7 +325,21 @@ private[inc] abstract class IncrementalCommon(
       {
         val hasMacro = a.hasMacro || b.hasMacro
         if (hasMacro && IncOptions.getRecompileOnMacroDef(options)) {
-          Some(APIChangeDueToMacroDefinition(className))
+          if (anyBinaryChanged) {
+            Some(APIChangeDueToMacroDefinition(className))
+          } else {
+            pendingMacroClasses += className
+            if (
+              (APIUtil.isAnnotationDefinition(a.api().classApi()) || APIUtil.isAnnotationDefinition(
+                b.api().classApi()
+              )) &&
+              a.apiHash() != b.apiHash()
+            ) {
+              Some(APIChangeDueToAnnotationDefinition(className))
+            } else {
+              findAPIChange(className, a, b)
+            }
+          }
         } else if (
           // Annotation usages need to be recompiled when the retention policy changes. This is
           // reflected in the API hash.
@@ -329,10 +355,18 @@ private[inc] abstract class IncrementalCommon(
       }
     }
     val apiChanges = recompiledClasses.flatMap(name => classDiff(name, oldAPI(name), newAPI(name)))
-    if (Incremental.apiDebug(options) && apiChanges.nonEmpty) {
-      logApiChanges(apiChanges, oldAPI, newAPI)
+
+    val allChanges =
+      if (!anyBinaryChanged && apiChanges.nonEmpty && pendingMacroClasses.nonEmpty) {
+        apiChanges ++ pendingMacroClasses.map(APIChangeDueToMacroDefinition(_))
+      } else {
+        apiChanges
+      }
+
+    if (Incremental.apiDebug(options) && allChanges.nonEmpty) {
+      logApiChanges(allChanges, oldAPI, newAPI)
     }
-    new APIChanges(apiChanges)
+    new APIChanges(allChanges)
   }
 
   /**
@@ -428,7 +462,12 @@ private[inc] abstract class IncrementalCommon(
       val incrementalExternalChanges = {
         val previousAPIs = previousAnalysis.apis
         val externalFinder = lookupAnalyzedClass(_: String, None).getOrElse(APIs.emptyAnalyzedClass)
-        detectAPIChanges(previousAPIs.allExternals, previousAPIs.externalAPI, externalFinder)
+        detectAPIChanges(
+          previousAPIs.allExternals,
+          previousAPIs.externalAPI,
+          externalFinder,
+          anyBinaryChanged = changedLibraries.nonEmpty
+        )
       }
 
       val changedExternalClassNames = incrementalExternalChanges.allModified.toSet
