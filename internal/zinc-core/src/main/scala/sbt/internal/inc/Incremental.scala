@@ -655,6 +655,7 @@ private final class AnalysisCallback(
   // Results of invalidation calculations (including whether to continue cycles) - the analysis at this point is
   // not useful and so isn't included.
   @volatile private[this] var invalidationResults: Option[CompileCycleResult] = None
+  @volatile private[this] var dependencyPhaseDone: Boolean = false
 
   private def add[A, B](map: TrieMap[A, ConcurrentSet[B]], a: A, b: B): Unit = {
     map.getOrElseUpdate(a, ConcurrentHashMap.newKeySet[B]()).add(b)
@@ -884,9 +885,9 @@ private final class AnalysisCallback(
         val extraApiHash = {
           if (d != DefinitionType.Trait) apiHash
           else {
-            // Parent hashes are applied when AnalyzedClass extraHash is assembled.
-            // At this point api(...) can only see previousAnalysis, which may hold
-            // stale hashes for same-cycle parents.
+            // Store the trait-local hash here. Parent hashes are folded in when
+            // AnalyzedClass extraHash is assembled, where current-cycle dependency
+            // callbacks are available.
             HashAPI(_.hashAPI(classApi), includePrivateDefsInTrait = true)
           }
         }
@@ -1001,17 +1002,40 @@ private final class AnalysisCallback(
           if classLike.definitionType() == DefinitionType.Trait =>
         traitClassExtraHashes.getOrElseUpdate(
           className, {
-            // This is the parent folding that used to live in api(...), but current
-            // cycle parents now come from the callback dependency data instead of
-            // previousAnalysis.
-            val parentHashes = inheritedExtraHashes(className, traitClassExtraHashes)
-            (parentHashes + currentExtraHash).hashCode()
+            val parentHashes = traitParentExtraHashes(className, traitClassExtraHashes)
+            traitExtraHash(currentExtraHash, parentHashes)
           }
         )
       case ApiInfo(_, extraHash, _) => extraHash
     }
 
-  private def inheritedExtraHashes(
+  private def traitExtraHash(
+      currentExtraHash: HashAPI.Hash,
+      parentExtraHashes: Set[HashAPI.Hash]
+  ): HashAPI.Hash =
+    (parentExtraHashes + currentExtraHash).hashCode()
+
+  private def traitParentExtraHashes(
+      className: String,
+      traitClassExtraHashes: mutable.Map[String, HashAPI.Hash]
+  ): Set[HashAPI.Hash] =
+    // API-phase early output happens before dependency callbacks are complete, so
+    // preserve the old previousAnalysis path until current-cycle deps are known.
+    if (dependencyPhaseDone) currentTraitParentExtraHashes(className, traitClassExtraHashes)
+    else previousTraitParentExtraHashes(className)
+
+  private def previousTraitParentExtraHashes(className: String): Set[HashAPI.Hash] =
+    incHandlerOpt.fold(Set.empty[HashAPI.Hash]) { handler =>
+      val analysis = handler.previousAnalysis
+      val inheritance = analysis.relations.inheritance
+      val externalParents = inheritance.external.forward(className)
+      val internalParents = inheritance.internal.forward(className)
+      val externalParentsAPI = externalParents.map(analysis.apis.externalAPI)
+      val internalParentsAPI = internalParents.map(analysis.apis.internalAPI)
+      (externalParentsAPI ++ internalParentsAPI).map(_.extraHash())
+    }
+
+  private def currentTraitParentExtraHashes(
       className: String,
       traitClassExtraHashes: mutable.Map[String, HashAPI.Hash]
   ): Set[HashAPI.Hash] = {
@@ -1176,6 +1200,7 @@ private final class AnalysisCallback(
   }
 
   override def dependencyPhaseCompleted(): Unit = {
+    dependencyPhaseDone = true
     val incHandler = incHandlerOpt.getOrElse(sys.error("incHandler was expected"))
     if (earlyOutput.isDefined && invalidationResults.isEmpty) {
       val a = getAnalysis
