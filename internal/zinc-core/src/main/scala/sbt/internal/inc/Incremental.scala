@@ -882,20 +882,7 @@ private final class AnalysisCallback(
       case d @ (DefinitionType.ClassDef | DefinitionType.Trait) =>
         val extraApiHash = {
           if (d != DefinitionType.Trait) apiHash
-          else {
-            val currentExtraHash = HashAPI(_.hashAPI(classApi), includePrivateDefsInTrait = true)
-            incHandlerOpt match {
-              case Some(handler) =>
-                val analysis = handler.previousAnalysis
-                val externalParents = analysis.relations.inheritance.external.forward(className)
-                val internalParents = analysis.relations.inheritance.internal.forward(className)
-                val externalParentsAPI = externalParents.map(analysis.apis.externalAPI)
-                val internalParentsAPI = internalParents.map(analysis.apis.internalAPI)
-                val parentsHashes = (externalParentsAPI ++ internalParentsAPI).map(_.extraHash())
-                (parentsHashes + currentExtraHash).hashCode()
-              case None => currentExtraHash
-            }
-          }
+          else HashAPI(_.hashAPI(classApi), includePrivateDefsInTrait = true)
         }
 
         classApis(className) = ApiInfo(apiHash, extraApiHash, savedClassApi)
@@ -958,7 +945,8 @@ private final class AnalysisCallback(
 
   private def getAnalysis: Analysis = {
     val analysis0 = addProductsAndDeps(Analysis.empty)
-    addUsedNames(addCompilation(analysis0))
+    val analysis1 = addTraitParentExtraHashes(analysis0)
+    addUsedNames(addCompilation(analysis1))
   }
 
   def getPostJavaAnalysis: Analysis = {
@@ -975,6 +963,51 @@ private final class AnalysisCallback(
     base.copy(
       relations = base.relations.addUsedNames(UsedNames.fromMultiMap(usedNames))
     )
+  }
+
+  private def addTraitParentExtraHashes(base: Analysis): Analysis = {
+    val analysisWithParents = incHandlerOpt.map(_.previousAnalysisPruned ++ base).getOrElse(base)
+    val calculatedExtraHashes = mutable.Map.empty[String, HashAPI.Hash]
+    val emptyHash = -1
+
+    def hasCompiledTrait(className: String): Boolean =
+      classApis
+        .get(className)
+        .exists(_.classLike.definitionType() == DefinitionType.Trait)
+
+    def objectExtraHash(className: String): HashAPI.Hash =
+      objectApis.get(className).map(_.extraHash).getOrElse(emptyHash)
+
+    def parentExtraHashes(className: String): Set[HashAPI.Hash] = {
+      val inheritance = analysisWithParents.relations.inheritance
+      val internalParents =
+        inheritance.internal.forward(className).map(companionExtraHash)
+      val externalParents =
+        inheritance.external
+          .forward(className)
+          .map(analysisWithParents.apis.externalAPI(_).extraHash())
+      internalParents ++ externalParents
+    }
+
+    def companionExtraHash(className: String): HashAPI.Hash =
+      calculatedExtraHashes.getOrElseUpdate(
+        className,
+        classApis.get(className) match {
+          case Some(ApiInfo(_, currentExtraHash, classLike))
+              if classLike.definitionType() == DefinitionType.Trait =>
+            val classExtraHash = (parentExtraHashes(className) + currentExtraHash).hashCode()
+            (classExtraHash, objectExtraHash(className)).hashCode()
+          case _ =>
+            analysisWithParents.apis.internalAPI(className).extraHash()
+        }
+      )
+
+    val internalApis = base.apis.internal.map {
+      case (className, analyzedClass) if hasCompiledTrait(className) =>
+        className -> analyzedClass.withExtraHash(companionExtraHash(className))
+      case other => other
+    }
+    base.copy(apis = APIs(internalApis, base.apis.external))
   }
 
   private def companionsWithHash(className: String): (Companions, HashAPI.Hash, HashAPI.Hash) = {
