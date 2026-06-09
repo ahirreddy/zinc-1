@@ -974,7 +974,7 @@ private final class AnalysisCallback(
     // current cycle's APIs and inheritance relations. Computing parent hashes in
     // api(...) would fold in stale previousAnalysis entries for same-cycle parents.
     val analysisWithParents = incHandlerOpt.map(_.previousAnalysisPruned ++ base).getOrElse(base)
-    val calculatedExtraHashes = mutable.Map.empty[String, HashAPI.Hash]
+    val calculatedCompanionExtraHashes = mutable.Map.empty[String, HashAPI.Hash]
     val emptyHash = -1
 
     def hasCompiledTrait(className: String): Boolean =
@@ -985,26 +985,20 @@ private final class AnalysisCallback(
     def objectExtraHash(className: String): HashAPI.Hash =
       objectApis.get(className).map(_.extraHash).getOrElse(emptyHash)
 
-    def parentExtraHashes(className: String): Set[HashAPI.Hash] = {
-      val inheritance = analysisWithParents.relations.inheritance
-      val internalParents =
-        inheritance.internal.forward(className).map(companionExtraHash)
-      val externalParents =
-        inheritance.external
-          .forward(className)
-          .map(analysisWithParents.apis.externalAPI(_).extraHash())
-      internalParents ++ externalParents
-    }
-
     def companionExtraHash(className: String): HashAPI.Hash =
-      calculatedExtraHashes.getOrElseUpdate(
+      calculatedCompanionExtraHashes.getOrElseUpdate(
         className,
         classApis.get(className) match {
           case Some(ApiInfo(_, currentExtraHash, classLike))
               if classLike.definitionType() == DefinitionType.Trait =>
             // Recurse through internal parents so current-cycle traits use the
             // hashes just computed in this compilation, not persisted old hashes.
-            val classExtraHash = (parentExtraHashes(className) + currentExtraHash).hashCode()
+            val classExtraHash = traitClassExtraHash(
+              className,
+              currentExtraHash,
+              analysisWithParents,
+              companionExtraHash
+            )
             (classExtraHash, objectExtraHash(className)).hashCode()
           case _ =>
             analysisWithParents.apis.internalAPI(className).extraHash()
@@ -1017,6 +1011,22 @@ private final class AnalysisCallback(
       case other => other
     }
     base.copy(apis = APIs(internalApis, base.apis.external))
+  }
+
+  private def traitClassExtraHash(
+      className: String,
+      currentExtraHash: HashAPI.Hash,
+      analysis: Analysis,
+      internalParentExtraHash: String => HashAPI.Hash
+  ): HashAPI.Hash = {
+    val inheritance = analysis.relations.inheritance
+    val externalParents = inheritance.external.forward(className)
+    val internalParents = inheritance.internal.forward(className)
+    val externalParentsAPI = externalParents.map(analysis.apis.externalAPI)
+    val parentHashes = externalParentsAPI.map(_.extraHash()) ++ internalParents.map(
+      internalParentExtraHash
+    )
+    (parentHashes + currentExtraHash).hashCode()
   }
 
   private def companionsWithHash(className: String): (Companions, HashAPI.Hash, HashAPI.Hash) = {
