@@ -882,7 +882,11 @@ private final class AnalysisCallback(
       case d @ (DefinitionType.ClassDef | DefinitionType.Trait) =>
         val extraApiHash = {
           if (d != DefinitionType.Trait) apiHash
-          else HashAPI(_.hashAPI(classApi), includePrivateDefsInTrait = true)
+          else {
+            // Parent hashes are applied later, after the current cycle's partial
+            // Analysis exists. At this point api(...) can only see previousAnalysis.
+            HashAPI(_.hashAPI(classApi), includePrivateDefsInTrait = true)
+          }
         }
 
         classApis(className) = ApiInfo(apiHash, extraApiHash, savedClassApi)
@@ -966,6 +970,9 @@ private final class AnalysisCallback(
   }
 
   private def addTraitParentExtraHashes(base: Analysis): Analysis = {
+    // Complete trait extraHash computation after addProductsAndDeps has recorded the
+    // current cycle's APIs and inheritance relations. Computing parent hashes in
+    // api(...) would fold in stale previousAnalysis entries for same-cycle parents.
     val analysisWithParents = incHandlerOpt.map(_.previousAnalysisPruned ++ base).getOrElse(base)
     val calculatedExtraHashes = mutable.Map.empty[String, HashAPI.Hash]
     val emptyHash = -1
@@ -995,6 +1002,8 @@ private final class AnalysisCallback(
         classApis.get(className) match {
           case Some(ApiInfo(_, currentExtraHash, classLike))
               if classLike.definitionType() == DefinitionType.Trait =>
+            // Recurse through internal parents so current-cycle traits use the
+            // hashes just computed in this compilation, not persisted old hashes.
             val classExtraHash = (parentExtraHashes(className) + currentExtraHash).hashCode()
             (classExtraHash, objectExtraHash(className)).hashCode()
           case _ =>
